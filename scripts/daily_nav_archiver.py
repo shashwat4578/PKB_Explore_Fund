@@ -7,85 +7,125 @@ from datetime import datetime, timedelta
 
 def get_latest_nav_data(start_date_str, end_date_str, max_retries=3):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+        )
     }
-    url = f"https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx?tp=1&frmdt={start_date_str}&todt={end_date_str}"
-    
+
+    url = (
+        "https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx"
+        f"?tp=1&frmdt={start_date_str}&todt={end_date_str}"
+    )
+
     print(f"Fetching data from {start_date_str} to {end_date_str}...")
+
     for attempt in range(1, max_retries + 1):
         try:
             response = requests.get(url, headers=headers, timeout=120)
-            if response.status_code == 200:
-                if "Scheme Code" not in response.text:
-                    print(f"Warning: Response for {start_date_str} to {end_date_str} does not contain valid CSV headers.")
-                    return None
-                df = pd.read_csv(io.StringIO(response.text), sep=';', on_bad_lines='skip', low_memory=False)
-                break
-            else:
-                print(f"Attempt {attempt}/{max_retries} returned status code {response.status_code}")
-        except Exception as e:
-            print(f"Attempt {attempt}/{max_retries} failed: {e}")
-            if attempt == max_retries:
-                return None
-            time.sleep(3)
-    else:
-        return None
-            
-            # Data Cleaning: Extract Categories and Remove non-data rows
+            response.raise_for_status()
+
             lines = response.text.splitlines()
+
+            if not any("Scheme Code" in line for line in lines):
+                print("Warning: AMFI response does not contain valid headers.")
+                if attempt < max_retries:
+                    time.sleep(3)
+                    continue
+                return None
+
+            header = None
             cleaned_data = []
             current_category = "Unknown"
-            
+
             for line in lines:
-                if not line.strip():
+                line = line.strip().lstrip("\ufeff")
+
+                if not line:
                     continue
-                
-                parts = line.split(';')
-                if len(parts) < 8:
-                    # Likely a category header
-                    if "(" in line and ")" in line:
-                        current_category = line.strip()
-                    continue
-                
-                # Check if it's the header row
-                if parts[0] == "Scheme Code":
+
+                parts = [part.strip() for part in line.split(";")]
+
+                # Identify the column header.
+                if parts[0].strip() == "Scheme Code":
                     header = parts
                     continue
-                
-                # It's a data row
+
+                # Ignore rows before the column header.
+                if header is None:
+                    if "(" in line and ")" in line:
+                        current_category = line
+                    continue
+
+                # Identify scheme data rows by numeric scheme code.
                 try:
                     scheme_code = float(parts[0])
-                    # Add category to parts
-                    row_data = parts + [current_category]
-                    cleaned_data.append(row_data)
-                except ValueError:
-                    # Not a data row
+                except (ValueError, IndexError):
                     if "(" in line and ")" in line:
-                        current_category = line.strip()
+                        current_category = line
                     continue
-            
-            if not cleaned_data:
+
+                if len(parts) < len(header):
+                    parts.extend([""] * (len(header) - len(parts)))
+                elif len(parts) > len(header):
+                    parts = parts[:len(header)]
+
+                parts[0] = str(int(scheme_code))
+                cleaned_data.append(parts + [current_category])
+
+            if not cleaned_data or header is None:
+                print("No valid NAV records found in the response.")
                 return None
-                
-            df = pd.DataFrame(cleaned_data, columns=header + ["Category"])
-            if 'NAV Name' in df.columns:
-                if 'Scheme Name' in df.columns:
-                    df['Scheme Name'] = df['Scheme Name'].fillna(df['NAV Name'])
+
+            df = pd.DataFrame(
+                cleaned_data,
+                columns=header + ["Category"]
+            )
+
+            # Standardize column names and fill alternate scheme names.
+            df.columns = df.columns.str.strip()
+
+            if "NAV Name" in df.columns:
+                if "Scheme Name" in df.columns:
+                    df["Scheme Name"] = df["Scheme Name"].replace(
+                        "", pd.NA
+                    ).fillna(df["NAV Name"])
                 else:
-                    df['Scheme Name'] = df['NAV Name']
-            
-            # Format columns
-            df['Scheme Code'] = pd.to_numeric(df['Scheme Code'], errors='coerce').astype(int)
-            numeric_cols = ['Net Asset Value', 'Repurchase Price', 'Sale Price']
+                    df["Scheme Name"] = df["NAV Name"]
+
+            # Convert numeric fields safely.
+            df["Scheme Code"] = pd.to_numeric(
+                df["Scheme Code"], errors="coerce"
+            ).astype("Int64")
+
+            numeric_cols = [
+                "Net Asset Value",
+                "Repurchase Price",
+                "Sale Price",
+            ]
+
             for col in numeric_cols:
                 if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            return df
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-    return None
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
 
+            # Remove rows without a valid scheme code.
+            df = df.dropna(subset=["Scheme Code"])
+
+            print(f"Retrieved {len(df)} NAV records.")
+            return df
+
+        except requests.RequestException as e:
+            print(f"Attempt {attempt}/{max_retries} failed: {e}")
+        except Exception as e:
+            print(f"Error processing NAV data: {e}")
+            return None
+
+        if attempt < max_retries:
+            time.sleep(3)
+
+    print("Failed to fetch NAV data after all retries.")
+    return None
+    
 def update_year_parquet(year):
     output_dir = f"nav_history/year={year}"
     file_path = f"{output_dir}/data.parquet"
