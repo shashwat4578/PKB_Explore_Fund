@@ -8,7 +8,11 @@ on:
 
 permissions:
   contents: write
-
+  
+concurrency:
+  group: daily-nav-archive
+  cancel-in-progress: false
+  
 jobs:
   archive-and-calculate:
     runs-on: ubuntu-latest
