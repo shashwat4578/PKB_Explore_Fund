@@ -2,43 +2,54 @@ name: Daily NAV Archiver & Performance Calculator
 
 on:
   schedule:
-    # 18:30 UTC = 12:00 AM IST next day
+    # 18:30 UTC = 12:00 AM IST the following day
     - cron: '30 18 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   archive-and-calculate:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
-          
+          cache: pip
+
       - name: Install Dependencies
-        run: pip install -r requirements.txt
-        
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Run NAV Archiver
-        run: python scripts/daily_nav_archiver.py
-        
-      - name: Run Performance Calculator
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || secrets.SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || secrets.SUPABASE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
-        run: python scripts/process_performance.py
-        
-      - name: Commit and Push Parquet Files
+        run: python -u scripts/daily_nav_archiver.py
+
+      - name: Run Performance Calculator
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+        run: python -u scripts/process_performance.py
+
+      - name: Commit and Push NAV History
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add nav_history/
-          git commit -m "chore: auto-update NAV history & performance [skip ci]" || echo "No changes to commit"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update NAV history and performance"
+            git push
+          fi
